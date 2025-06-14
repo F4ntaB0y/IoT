@@ -4,7 +4,7 @@
  * driver motor L298N, server web WiFi, dan sensor jarak HC-SR04, juga LED.
  * Memungkinkan kontrol arah (maju, mundur, belok, berhenti) pada kecepatan penuh,
  * kontrol manual untuk mengaktifkan/menonaktifkan deteksi jarak sensor (memicu
- * buzzer jika objek di bawah 5 cm), dan kontrol LED.
+ * buzzer jika objek di bawah 10 cm), dan kontrol LED.
  * AUTHOR: Muh. Arya Pangestu
  * TANGGAL: 14 Juni 2025
  *******************************************************************************/
@@ -170,11 +170,11 @@ void loop() {
 
     unsigned int distance_cm = sonar.ping_cm(); // Membaca jarak dalam cm
 
-    if (distance_cm > 0 && distance_cm < 5) {
+    if (distance_cm > 0 && distance_cm < 10) {
       Serial.print("Objek terdeteksi pada ");
       Serial.print(distance_cm);
       Serial.println(" cm! Buzzer berbunyi!");
-      BeepHorn(); // Memicu buzzer jika jarak kurang dari 5 cm
+      BeepHorn(); // Memicu buzzer jika jarak kurang dari 10 cm
     }
   }
 
