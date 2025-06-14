@@ -14,8 +14,7 @@
 #include <ArduinoOTA.h>       // Library untuk pembaruan firmware Over-The-Air (OTA)
 #include <NewPing.h>          // Library untuk sensor jarak ultrasonik HC-SR04
 
-// --- Motor 1 (Roda Kiri) - Terhubung ke OUT1 & OUT2 L298N, dikontrol oleh ENA ---
-const int ENA_PIN = D1;     // Pin ENA L298N untuk kontrol kecepatan (PWM)
+// --- Motor 1 (Roda Kiri) - Terhubung ke OUT1 & OUT2 L298N ---
 const int IN1_LEFT = D3;    // Pin IN1 L298N untuk kontrol arah motor kiri
 const int IN2_LEFT = D4;    // Pin IN2 L298N untuk kontrol arah motor kiri
 
@@ -86,7 +85,6 @@ void setup() {
   digitalWrite(LED_PIN, LOW);      // Pastikan LED mati di awal
 
   // Mengatur semua pin kontrol motor sebagai output
-  pinMode(ENA_PIN, OUTPUT);
   pinMode(IN1_LEFT, OUTPUT);
   pinMode(IN2_LEFT, OUTPUT);
   pinMode(IN1_RIGHT, OUTPUT);
