@@ -38,11 +38,12 @@ NewPing sonar(HCSR04_TRIGGER_PIN, HCSR04_ECHO_PIN, MAX_DISTANCE_CM);
 String command;              // String untuk menyimpan perintah dari aplikasi web
 int MOTOR_SPEED = 1023;      // Kecepatan motor default, selalu diatur ke nilai maksimum (0-1023 untuk analogWrite)
 int speed_Coeff = 3;         // Koefisien untuk kecepatan belok diferensial (memperlambat salah satu motor)
-bool sensorEnabled = false;  // Flag untuk mengaktifkan/menonaktifkan sensor jarak
+bool sensorEnabled = false;  // Flag untuk mengaktifkan/nonaktifkan sensor jarak
 unsigned int currentDistanceCm = 0; // Variabel global untuk menyimpan jarak sensor terbaru
 
-// Flag untuk mode otomatis
+// Flag untuk mode operasi
 bool autonomousMode = false;
+bool petMode = false;
 
 // Membuat objek server web pada port 80
 ESP8266WebServer server(80);
@@ -52,8 +53,13 @@ unsigned long lastSensorReadMillis = 0; // Untuk interval pembacaan sensor
 const long sensorReadInterval = 100;    // Interval pembacaan sensor dalam ms (misal: 100ms)
 
 // Konstanta untuk batas jarak mode otomatis (disesuaikan untuk sensor di belakang)
-const int OBSTACLE_STOP_DISTANCE = 15; // Jarak (cm) di mana robot harus berhenti
-const int OBSTACLE_TURN_DISTANCE = 25; // Jarak (cm) di mana robot harus mulai mempertimbangkan belok
+const int OBSTACLE_STOP_DISTANCE = 15; // Jarak (cm) di mana robot harus berhenti (mode otonom)
+const int OBSTACLE_TURN_DISTANCE = 25; // Jarak (cm) di mana robot harus mulai mempertimbangkan belok (mode otonom)
+
+// Konstanta untuk batas jarak mode PET
+const int PET_MODE_APPROACH_MIN = 10; // Jarak minimum (cm) untuk mulai mendekat
+const int PET_MODE_APPROACH_MAX = 15; // Jarak maksimum (cm) untuk mulai mendekat
+const int PET_MODE_STOP_DISTANCE = 5; // Jarak (cm) di mana robot harus berhenti total (mode PET)
 
 // --- Konfigurasi WiFi ---
 // Jika dibiarkan kosong, ESP8266 akan mencoba terhubung selama 10 detik,
@@ -78,6 +84,7 @@ void BeepHorn();
 void TurnLightOn();
 void TurnLightOff();
 void AutonomousMode();
+void PetMode();
 
 void setup() {
   Serial.begin(115200); // Mengatur komunikasi Serial untuk debugging
@@ -99,9 +106,6 @@ void setup() {
   pinMode(IN2_LEFT, OUTPUT);
   pinMode(IN1_RIGHT, OUTPUT);
   pinMode(IN2_RIGHT, OUTPUT);
-
-  // Pastikan motor berhenti saat startup
-  Stop(); // Memanggil fungsi Stop untuk mengatur semua pin motor ke LOW
 
   // --- Pengaturan WiFi ---
   // Mengatur hostname WiFi NodeMCU berdasarkan alamat MAC chip (untuk identifikasi lebih mudah)
@@ -183,69 +187,105 @@ void loop() {
     // atau di bawah min_cm (default 2cm).
     // Jika 0, kita bisa set ke MAX_DISTANCE_CM + 1 untuk menandakan "tidak ada objek" dalam jangkauan
     if (distance_cm == 0) {
-      currentDistanceCm = MAX_DISTANCE_CM + 1; // Anggap sangat jauh jika 0 atau di luar jangkauan
+      currentDistanceCm = MAX_DISTANCE_CM + 1; // Assume very far if 0 or out of range
     } else {
       currentDistanceCm = distance_cm; // Update global variable
     }
 
-    // Pemicu Buzzer jika sensor diaktifkan dan ada objek sangat dekat
-    if (sensorEnabled && currentDistanceCm > 0 && currentDistanceCm < 10) {
-      Serial.print("Objek terdeteksi pada ");
-      Serial.print(currentDistanceCm);
-      Serial.println(" cm! Buzzer berbunyi!");
-      BeepHorn(); // Memicu buzzer jika jarak kurang dari 10 cm
+    // Pemicu Buzzer
+    // Buzzer akan berbunyi jika sensor diaktifkan dan:
+    // 1. Dalam mode manual/otonom DAN objek sangat dekat (<10cm)
+    // 2. Dalam mode PET DAN objek dalam rentang PET (5-15cm)
+    if (sensorEnabled) {
+      if (!petMode && currentDistanceCm > 0 && currentDistanceCm < 10) { // Mode non-PET, objek sangat dekat
+        Serial.print("Objek terdeteksi pada ");
+        Serial.print(currentDistanceCm);
+        BeepHorn();
+      } else if (petMode && currentDistanceCm > 0 && currentDistanceCm <= PET_MODE_APPROACH_MAX) { // Mode PET, objek dalam rentang deteksi
+        Serial.print("Objek terdeteksi pada ");
+        Serial.print(currentDistanceCm);
+        BeepHorn();
+      }
     }
   }
 
-  // --- Pemrosesan Perintah (Selalu aktif, termasuk saat mode otomatis) ---
+  // --- Process Commands (Always active, including during auto/PET modes) ---
   if (server.hasArg("State")) {
-    command = server.arg("State"); // Mendapatkan nilai perintah
+    command = server.arg("State"); // Get the command value
     Serial.print("Perintah diterima: ");
-    Serial.println(command); // Mencetak perintah yang diterima ke monitor Serial
+    Serial.println(command); // Print the received command to Serial monitor
 
-    // Perintah STOP (S) selalu diproses terlebih dahulu untuk keamanan
+    // Perintah STOP ('S') dan Sensor OFF ('w') selalu diproses untuk mematikan sensor
     if (command == "S") {
-      autonomousMode = false; // Pastikan mode otomatis dimatikan jika STOP ditekan
-      Stop();
-      Serial.println("STOP! Mode Otomatis dinonaktifkan.");
+      autonomousMode = false; // Matikan mode otonom
+      petMode = false;        // Matikan mode PET
+      Stop();                 // Hentikan motor
+      Serial.println("STOP!");
+    }
+    else if (command == "w") { // Perintah 'w' untuk Sensor OFF
+      sensorEnabled = false;
+      TurnLightOff();
+      Serial.println("Sensor jarak dinonaktifkan dan lampu mati!");
+      // Jika sensor dimatikan secara manual, mode cerdas juga harus mati
+      if (autonomousMode || petMode) {
+        autonomousMode = false;
+        petMode = false;
+        Stop();
+        Serial.println("Mode Otomatis juga dinonaktifkan saat sensor dimatikan.");
+      }
     }
     // Perintah untuk mengaktifkan/menonaktifkan mode otomatis
     else if (command == "A") { // 'A' untuk Autonomous Mode ON
       autonomousMode = true;
-      sensorEnabled = true; // Pastikan sensor aktif di mode otomatis
-      TurnLightOn(); // Nyalakan lampu LED sebagai indikator
+      petMode = false;       // Pastikan mode PET nonaktif
+      sensorEnabled = true;  // Aktifkan sensor saat mode otonom ON
+      TurnLightOn();         // Nyalakan LED sebagai indikator
       Serial.println("Mode Otomatis AKTIF!");
-      // Mulai mundur saat mode otomatis aktif (karena sensor di belakang)
-      Backward();
+      Backward(); // Mulai mundur saat mode otomatis aktif (sensor di belakang)
     }
     else if (command == "a") { // 'a' untuk Autonomous Mode OFF
       autonomousMode = false;
       Stop(); // Berhenti saat mode otomatis dinonaktifkan
       Serial.println("Mode Otomatis NONAKTIF!");
+      // Sensor tetap pada status sebelumnya (tidak diubah oleh 'a')
     }
-    // Hanya memproses perintah manual motor lainnya jika TIDAK dalam mode otomatis
-    else if (!autonomousMode) {
-      if (command == "F") Forward();         // Bergerak maju (kecepatan penuh)
-      else if (command == "B") Backward();   // Bergerak mundur (kecepatan penuh)
-      else if (command == "R") TurnRight();  // Berbelok ke kanan di tempat (kecepatan penuh)
-      else if (command == "L") TurnLeft();   // Berbelok ke kiri di tempat (kecepatan penuh)
-      else if (command == "V") BeepHorn();         // Mengaktifkan buzzer (klakson) - ini adalah perintah manual
-      else if (command == "W") {                 // Perintah untuk MENGAKTIFKAN sensor DAN MENYALAKAN lampu
-        sensorEnabled = true;
-        TurnLightOn(); // Nyalakan lampu LED
-        Serial.println("Sensor jarak diaktifkan dan lampu menyala!");
-      }
-      else if (command == "w") {                 // Perintah untuk MENONAKTIFKAN sensor DAN MEMATIKAN lampu
-        sensorEnabled = false;
-        TurnLightOff(); // Matikan lampu LED
-        Serial.println("Sensor jarak dinonaktifkan dan lampu mati!");
-      }
+    // Perintah untuk mengaktifkan/menonaktifkan mode PET
+    else if (command == "P") { // 'P' untuk Pet Mode ON
+      petMode = true;
+      autonomousMode = false; // Pastikan mode Otomatis nonaktif
+      sensorEnabled = true;  // Aktifkan sensor saat mode PET ON
+      TurnLightOn();         // Nyalakan LED sebagai indikator
+      Serial.println("Mode PET AKTIF!");
+      Stop(); // Mulai dengan berhenti dan menunggu objek
+    }
+    else if (command == "p") { // 'p' untuk Pet Mode OFF
+      petMode = false;
+      Stop(); // Berhenti saat mode PET dinonaktifkan
+      Serial.println("Mode PET NONAKTIF!");
+      // Sensor tetap pada status sebelumnya (tidak diubah oleh 'p')
+    }
+    // Perintah untuk mengaktifkan sensor ON (secara manual)
+    else if (command == "W") { // 'W' untuk Sensor ON
+      sensorEnabled = true;
+      TurnLightOn();
+      Serial.println("Sensor jarak diaktifkan dan lampu menyala!");
+    }
+    // Hanya memproses perintah manual motor lainnya jika TIDAK dalam mode otomatis/PET
+    // DAN TIDAK MENGUBAH STATUS SENSORENABLED
+    else if (!autonomousMode && !petMode) {
+      if (command == "F") { Forward(); /* Sensor status remains unchanged */ }
+      else if (command == "B") { Backward(); /* Sensor status remains unchanged */ }
+      else if (command == "R") { TurnRight(); /* Sensor status remains unchanged */ }
+      else if (command == "L") { TurnLeft(); /* Sensor status remains unchanged */ }
+      else if (command == "V") { BeepHorn(); /* Sensor status remains unchanged */ }
     }
   }
 
-  // --- Logika Mode Otomatis ---
+  // --- Logika Mode Otomatis / PET ---
   if (autonomousMode) {
     AutonomousMode();
+  } else if (petMode) {
+    PetMode();
   }
 }
 
@@ -265,160 +305,231 @@ void HTTP_handleRoot(void) {
     height: 100%;
     margin: 0;
     padding: 0;
-    overflow: hidden; /* Mencegah scrolling */
-    font-family: Arial, sans-serif;
-    background-color: #f0f0f0;
-  }
-  body {
+    overflow: hidden; /* Prevent scrolling */
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; /* Modern font */
+    background-color: #e9ecef; /* Lighter background */
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center; /* Memusatkan konten secara vertikal */
+    justify-content: center; /* Vertically center content */
     text-align: center;
   }
   .header {
-    width: 100%;
-    max-width: 600px;
-    background-color: #007bff;
+    width: 90%;
+    max-width: 800px; /* Increased max-width for desktop */
+    background-color: #0056b3; /* Darker blue header */
     color: white;
-    padding: 10px 0;
-    border-radius: 8px;
-    margin-bottom: 15px;
-    flex-shrink: 0; /* Mencegah header menyusut */
+    padding: 20px 0;
+    border-radius: 12px; /* More rounded corners */
+    margin-bottom: 25px;
+    flex-shrink: 0;
+    box-shadow: 0 6px 15px rgba(0,0,0,0.2); /* Stronger shadow */
   }
   .header h1 {
     margin: 0;
-    font-size: 1.5em;
+    font-size: 2em; /* Larger header font */
+    letter-spacing: 1px;
   }
   .header p {
-    margin: 5px 0 0;
-    font-size: 0.9em;
+    margin: 8px 0 0;
+    font-size: 1.1em;
+    opacity: 0.9;
   }
   .distance-display {
-    font-size: 1.8em;
+    font-size: 2.2em; /* Larger distance font */
     font-weight: bold;
-    color: #333;
-    margin-bottom: 15px;
-    padding: 10px 20px;
-    background-color: #fff;
-    border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    color: #212529; /* Darker text */
+    margin-bottom: 25px;
+    padding: 18px 35px;
+    background-color: #ffffff; /* White background */
+    border-radius: 12px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
     flex-shrink: 0;
+    min-width: 200px; /* Ensure it doesn't get too small */
   }
   .container {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 15px;
-    width: 95%; /* Menggunakan persentase agar responsif */
-    max-width: 600px;
-    height: 60vh; /* Menggunakan persentase tinggi viewport */
-    max-height: 500px;
-    background-color: white;
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    align-items: stretch; /* Memastikan item meregang */
-    justify-items: stretch; /* Memastikan item meregang */
+    gap: 20px; /* Larger gap */
+    width: 95%;
+    max-width: 800px; /* Increased max-width for desktop */
+    height: auto; /* Let content define height for flexibility */
+    padding: 30px; /* Larger padding */
+    background-color: #f8f9fa; /* Light grey background */
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.18); /* Stronger shadow */
+    align-items: stretch;
+    justify-items: stretch;
   }
   .button {
     width: 100%;
-    height: 100%; /* Tombol mengisi sel grid sepenuhnya */
+    height: auto; /* Adjust height dynamically */
+    min-height: 80px; /* Minimum height for better touch target */
     padding: 15px 0;
-    font-size: 2.2em;
+    font-size: 2.5em; /* Larger button font */
     font-weight: bold;
     color: white;
-    background-color: #4CAF50; /* Hijau */
+    background-color: #28a745; /* Bootstrap green */
     border: none;
-    border-radius: 8px;
+    border-radius: 10px;
     cursor: pointer;
     text-align: center;
     text-decoration: none;
-    display: flex; /* Menggunakan flex untuk memusatkan konten tombol */
+    display: flex;
     justify-content: center;
     align-items: center;
-    transition: background-color 0.3s ease;
-    -webkit-tap-highlight-color: rgba(0,0,0,0); /* Mencegah highlight biru saat disentuh di mobile */
+    transition: background-color 0.2s ease, transform 0.1s ease; /* Smooth transitions */
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
   }
   .button:active {
-    background-color: #3e8e41;
+    background-color: #218838; /* Darker on active */
+    transform: translateY(2px); /* Slight press effect */
   }
 
-  /* Warna khusus untuk tombol aksi */
-  .button.stop { background-color: #f44336; } /* Merah */
-  .button.stop:active { background-color: #da190b; }
-  .button.horn { background-color: #ff9800; } /* Oranye */
-  .button.horn:active { background-color: #e68a00; }
-  .button.light { background-color: #2196F3; } /* Biru */
-  .button.light:active { background-color: #0b7dda; }
-  .button.sensor { background-color: #9c27b0; } /* Ungu */
-  .button.sensor:active { background-color: #7b1fa2; }
-  .button.autonomous { background-color: #8BC34A; } /* Hijau muda untuk autonomous */
-  .button.autonomous:active { background-color: #689F38; }
+  /* Specific button colors */
+  .button.stop { background-color: #dc3545; } /* Bootstrap red */
+  .button.stop:active { background-color: #c82333; }
+  .button.horn { background-color: #ffc107; color: #343a40; } /* Bootstrap yellow, dark text */
+  .button.horn:active { background-color: #e0a800; }
+  .button.sensor { background-color: #6f42c1; } /* Bootstrap purple */
+  .button.sensor:active { background-color: #5a2e9e; }
+  .button.autonomous { background-color: #20c997; } /* Bootstrap teal */
+  .button.autonomous:active { background-color: #19a47c; }
+  .button.pet { background-color: #fd7e14; } /* Bootstrap orange */
+  .button.pet:active { background-color: #e46001; }
 
-  /* Penyesuaian tata letak grid */
+  /* Directional buttons */
   .directional-button {
-    background-color: #008CBA;
+    background-color: #007bff; /* Bootstrap blue */
   }
   .directional-button:active {
-    background-color: #005f7c;
+    background-color: #0056b3;
   }
   .button.icon-button {
-    font-size: 1.2em; /* Ukuran font disesuaikan */
-    padding: 10px;
-    line-height: 1.2; /* Menambahkan line-height untuk perataan teks */
+    font-size: 1.4em; /* Adjusted font size for multi-line text */
+    padding: 12px;
+    line-height: 1.3;
+    min-height: 60px; /* Ensure smaller buttons are still touchable */
   }
   .button.stop-park {
     grid-column: span 3;
-    font-size: 2.5em;
-    background-color: #607d8b;
+    font-size: 3.2em; /* Larger STOP button font */
+    background-color: #6c757d; /* Bootstrap grey */
   }
   .button.stop-park:active {
-    background-color: #455a64;
+    background-color: #5a6268;
   }
   .footer-text {
-    margin-top: 15px;
-    font-size: 0.8em;
-    color: #555;
-    flex-shrink: 0; /* Mencegah footer menyusut */
+    margin-top: 25px;
+    font-size: 1em;
+    color: #6c757d; /* Muted grey for footer */
+    flex-shrink: 0;
   }
 
-  /* Untuk tampilan mobile agar lebih proporsional */
-  @media (max-width: 480px) and (orientation: portrait) {
+  /* Media Queries for Responsiveness */
+  /* For portrait mobile */
+  @media (max-width: 576px) and (orientation: portrait) {
+    .header {
+      padding: 15px 0;
+      margin-bottom: 15px;
+    }
+    .header h1 {
+      font-size: 1.8em;
+    }
+    .header p {
+      font-size: 1em;
+    }
+    .distance-display {
+      font-size: 1.6em;
+      margin-bottom: 15px;
+      padding: 12px 25px;
+    }
     .container {
-      grid-template-columns: repeat(3, 1fr);
-      height: 50vh; /* Sesuaikan tinggi untuk potret */
+      gap: 15px;
+      padding: 20px;
+      height: auto; /* Allow dynamic height based on content */
+      max-height: none; /* Remove max-height constraint */
+    }
+    .button {
+      font-size: 2em;
+      min-height: 70px;
+    }
+    .button.icon-button {
+      font-size: 1.1em;
+      padding: 10px;
+      min-height: 50px;
+    }
+    .button.stop-park {
+      font-size: 2.5em;
+    }
+    .footer-text {
+      margin-top: 15px;
+      font-size: 0.9em;
+    }
+  }
+
+  /* For landscape mobile/tablet */
+  @media (max-height: 600px) and (orientation: landscape) {
+    body {
+      padding: 10px;
+      justify-content: flex-start; /* Align content to top in landscape to save space */
+    }
+    .header {
+      margin-bottom: 15px;
+      padding: 15px 0;
+    }
+    .header h1 {
+      font-size: 1.6em;
+    }
+    .header p {
+      font-size: 0.9em;
+    }
+    .distance-display {
+      font-size: 1.5em;
+      margin-bottom: 15px;
+      padding: 10px 20px;
+    }
+    .container {
+      height: auto; /* Allow dynamic height */
+      max-height: none; /* Remove fixed height constraint */
       gap: 10px;
       padding: 15px;
     }
     .button {
       font-size: 1.8em;
+      min-height: 60px;
     }
     .button.icon-button {
       font-size: 1em;
+      padding: 8px;
+      min-height: 40px;
     }
     .button.stop-park {
-        font-size: 2em;
-    }
-  }
-  
-  @media (max-height: 480px) and (orientation: landscape) {
-    .header {
-        margin-bottom: 5px;
-    }
-    .header h1 {
-        font-size: 1.2em;
-    }
-    .container {
-        height: 70vh;
-        gap: 8px;
-        padding: 10px;
-    }
-    .button {
-        font-size: 1.5em;
+      font-size: 2.2em;
     }
     .footer-text {
-        margin-top: 5px;
-        font-size: 0.7em;
+      margin-top: 10px;
+      font-size: 0.8em;
+    }
+  }
+
+  /* Further optimization for very wide screens (e.g., large monitors) */
+  @media (min-width: 1024px) {
+    .header, .distance-display, .container {
+      padding-left: 40px;
+      padding-right: 40px;
+      max-width: 900px; /* Even wider for very large screens */
+    }
+    .button {
+        min-height: 90px;
+        font-size: 2.8em;
+    }
+    .button.icon-button {
+        font-size: 1.6em;
+        min-height: 70px;
+    }
+    .button.stop-park {
+        font-size: 3.5em;
     }
   }
 </style>
@@ -430,7 +541,7 @@ void HTTP_handleRoot(void) {
         // console.log("Command '" + cmd + "' sent. Response: " + this.responseText);
       }
     };
-    // Menggunakan IP robot yang sama dengan halaman ini
+    // Use the same robot IP as this page
     xhttp.open("GET", "/?State=" + cmd, true);
     xhttp.send();
   }
@@ -451,7 +562,7 @@ void HTTP_handleRoot(void) {
     xhttp.send();
   }
 
-  // Panggil getDistance setiap 500ms untuk pembaruan real-time
+  // Call getDistance every 500ms for real-time updates
   setInterval(getDistance, 500);
 </script>
 </head>
@@ -474,10 +585,12 @@ void HTTP_handleRoot(void) {
     <button class="button directional-button" ontouchstart="sendCommand('L')" onmouseup="sendCommand('S')" ontouchend="sendCommand('S')">&#8592;</button>
     <div style="display: flex; flex-direction: column; gap: 10px;">
       <button class="button icon-button horn" ontouchstart="sendCommand('V')" onmouseup="sendCommand('S')" ontouchend="sendCommand('S')">&#128266; Klakson</button>
-      <button class="button icon-button sensor" onclick="sendCommand('W')">Sensor ON</button>
-      <button class="button icon-button sensor" onclick="sendCommand('w')">Sensor OFF</button>
+      <button class="button icon-button sensor" onclick="sendCommand('W')">Lampu ON</button>
+      <button class="button icon-button sensor" onclick="sendCommand('w')">Lampu OFF</button>
       <button class="button icon-button autonomous" onclick="sendCommand('A')">MODE OTOMATIS ON</button>
       <button class="button icon-button autonomous" onclick="sendCommand('a')">MODE OTOMATIS OFF</button>
+      <button class="button icon-button pet" onclick="sendCommand('P')">MODE PELIHARAAN ON</button>
+      <button class="button icon-button pet" onclick="sendCommand('p')">MODE PELIHARAAN OFF</button>
     </div>
     <button class="button directional-button" ontouchstart="sendCommand('R')" onmouseup="sendCommand('S')" ontouchend="sendCommand('S')">&#8594;</button>
 
@@ -488,24 +601,26 @@ void HTTP_handleRoot(void) {
     <button class="button stop-park" onclick="sendCommand('S')">STOP</button>
   </div>
 
+  <p class="footer-text">Kontrol robot Anda melalui WiFi. Gunakan tombol panah untuk arah, dan tombol di tengah untuk fungsi tambahan.</p>
+
 </body>
 </html>
 )rawliteral";
 
-  // Dapatkan alamat IP saat ini untuk ditampilkan di halaman
+  // Get current IP address to display on the page
   String ipAddress;
   if (WiFi.status() == WL_CONNECTED) {
     ipAddress = WiFi.localIP().toString();
   } else {
     ipAddress = WiFi.softAPIP().toString();
   }
-  html.replace("%IP_ADDRESS%", ipAddress); // Ganti placeholder dengan IP aktual
-  html.replace("%MAX_DISTANCE_CM%", String(MAX_DISTANCE_CM)); // Ganti placeholder untuk tampilan jarak jauh
+  html.replace("%IP_ADDRESS%", ipAddress); // Replace placeholder with actual IP
+  html.replace("%MAX_DISTANCE_CM%", String(MAX_DISTANCE_CM)); // Replace placeholder for far distance display
 
   server.send(200, "text/html", html);
 }
 
-// Fungsi untuk menangani permintaan URI yang tidak dikenal (HTTP 404 Not Found)
+// Function to handle unknown URI requests (HTTP 404 Not Found)
 void handleNotFound() {
   server.send(404, "text/plain", "404: Tidak Ditemukan");
 }
@@ -515,82 +630,82 @@ void handleGetDistance() {
   server.send(200, "text/plain", String(currentDistanceCm));
 }
 
-// --- Fungsi Kontrol Motor ---
+// --- Motor Control Functions ---
 
-// Menggerakkan kedua motor maju
+// Move both motors forward
 void Forward() {
-  // Motor Kiri (Motor A)
+  // Left Motor (Motor A)
   digitalWrite(IN1_LEFT, HIGH);
   digitalWrite(IN2_LEFT, LOW);
 
-  // Motor Kanan (Motor B)
+  // Right Motor (Motor B)
   digitalWrite(IN1_RIGHT, HIGH);
   digitalWrite(IN2_RIGHT, LOW);
 }
 
-// Menggerakkan kedua motor mundur
+// Move both motors backward
 void Backward() {
-  // Motor Kiri (Motor A)
+  // Left Motor (Motor A)
   digitalWrite(IN1_LEFT, LOW);
   digitalWrite(IN2_LEFT, HIGH);
 
-  // Motor Kanan (Motor B)
+  // Right Motor (Motor B)
   digitalWrite(IN1_RIGHT, LOW);
   digitalWrite(IN2_RIGHT, HIGH);
 }
 
-// Membelokkan robot ke kanan di tempat (Motor kiri maju, Motor kanan mundur)
+// Turn robot right in place (Left motor forward, Right motor backward)
 void TurnRight() {
-  // Motor Kiri (Motor A) - Maju
+  // Left Motor (Motor A) - Forward
   digitalWrite(IN1_LEFT, HIGH);
   digitalWrite(IN2_LEFT, LOW);
 
-  // Motor Kanan (Motor B) - Mundur
+  // Right Motor (Motor B) - Backward
   digitalWrite(IN1_RIGHT, LOW);
   digitalWrite(IN2_RIGHT, HIGH);
 }
 
-// Membelokkan robot ke kiri di tempat (Motor kiri mundur, Motor kanan maju)
+// Turn robot left in place (Left motor backward, Right motor forward)
 void TurnLeft() {
-  // Motor Kiri (Motor A) - Mundur
+  // Left Motor (Motor A) - Backward
   digitalWrite(IN1_LEFT, LOW);
   digitalWrite(IN2_LEFT, HIGH);
 
-  // Motor Kanan (Motor B) - Maju
+  // Right Motor (Motor B) - Forward
   digitalWrite(IN1_RIGHT, HIGH);
   digitalWrite(IN2_RIGHT, LOW);
 }
 
-// Menghentikan kedua motor segera
+// Stop both motors immediately
 void Stop() {
-  // Motor Kiri (Motor A)
+  // Left Motor (Motor A)
   digitalWrite(IN1_LEFT, LOW);
   digitalWrite(IN2_LEFT, LOW);
 
-  // Motor Kanan (Motor B)
+  // Right Motor (Motor B)
   digitalWrite(IN1_RIGHT, LOW);
   digitalWrite(IN2_RIGHT, LOW);
 }
 
-// Mengaktifkan buzzer (klakson) untuk durasi singkat
+// Activate buzzer (horn) for a short duration
 void BeepHorn() {
-  digitalWrite(BUZZER_PIN, HIGH); // Menyalakan buzzer
-  delay(150);                     // Berbunyi selama 150ms (ini akan memblokir eksekusi kode lain sejenak)
-  digitalWrite(BUZZER_PIN, LOW);  // Mematikan buzzer
-  delay(80);                      // Jeda singkat (ini akan memblokir eksekusi kode lain sejenak)
+  digitalWrite(BUZZER_PIN, HIGH); // Turn on buzzer
+  delay(150);                     // Beep for 150ms (this will momentarily block other code execution)
+  digitalWrite(BUZZER_PIN, LOW);  // Turn off buzzer
+  delay(80);                      // Short pause (this will momentarily block other code execution)
 }
 
-// Fungsi untuk menyalakan LED tambahan (terhubung ke D2)
+// Function to turn on additional LED (connected to D2)
 void TurnLightOn() {
   digitalWrite(LED_PIN, HIGH);
 }
 
-// Fungsi untuk mematikan LED tambahan (terhubung ke D2)
+// Function to turn off additional LED (connected to D2)
 void TurnLightOff() {
   digitalWrite(LED_PIN, LOW);
 }
 
-// Fungsi untuk Mode Otomatis (disesuaikan untuk sensor di belakang)
+// Function for Autonomous Mode (adjusted for sensor at the back)
 void AutonomousMode() {
   // Pastikan sensor diaktifkan di mode ini
   sensorEnabled = true;
@@ -629,5 +744,30 @@ void AutonomousMode() {
   } else { // Tidak ada objek di belakang dalam jarak aman, terus mundur
     Serial.println("Mode Otomatis: Bergerak Mundur.");
     Backward(); // Robot terus mundur (gerakan dasar mode otomatis)
+  }
+}
+
+// Function for PET Mode (Pet) - Corrected to move backward and use buzzer
+void PetMode() {
+  sensorEnabled = true; // Pastikan sensor aktif di mode ini
+
+  if (currentDistanceCm > PET_MODE_STOP_DISTANCE && currentDistanceCm <= PET_MODE_APPROACH_MAX) {
+    // Objek terdeteksi dalam rentang mendekat (misal 5-15cm)
+    Serial.print("Mode PET: Objek pada ");
+    Serial.print(currentDistanceCm);
+    Serial.println(" cm. Mendekat (Mundur)...");
+    Backward(); // **Bergerak mundur** untuk mendekati objek (sensor di belakang)
+    // Buzzer otomatis akan berbunyi karena kondisi di loop() sekarang mencakup mode PET
+  } else if (currentDistanceCm <= PET_MODE_STOP_DISTANCE && currentDistanceCm != 0) {
+    // Objek terlalu dekat (misal <= 5cm), berhenti total
+    Serial.print("Mode PET: Objek terlalu dekat pada ");
+    Serial.print(currentDistanceCm);
+    Serial.println(" cm! BERHENTI.");
+    Stop();
+    // Buzzer otomatis akan berbunyi karena kondisi di loop() sekarang mencakup mode PET
+  } else {
+    // Objek di luar jangkauan deteksi (lebih dari PET_MODE_APPROACH_MAX atau tidak terdeteksi)
+    Serial.println("Mode PET: Tidak ada objek dalam jangkauan. Diam.");
+    Stop(); // Berhenti dan tunggu objek masuk ke jangkauan
   }
 }
