@@ -155,7 +155,7 @@ void setup() {
   // Memungkinkan mengunggah firmware baru secara nirkabel melalui Arduino IDE.
   ArduinoOTA.setHostname(hostname.c_str());
   ArduinoOTA.begin();
-  Serial.println("OTA diaktifkan. Anda dapat mengunggah firmware secara nirkabel.");
+  Serial.println("OTA diaktifkan.");
 }
 
 void loop() {
